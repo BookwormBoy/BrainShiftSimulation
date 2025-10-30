@@ -1,0 +1,173 @@
+load "msh3"
+load "medit"
+
+real E = 1e6;           // Young's modulus (Pa)
+real nu = 0.3;          // Poisson's ratio
+real rho = 200;         // Density (kg/m³)
+real thickness = 0.001; // Cloth thickness (m)
+real g = -9.81;          // Gravity (m/s²)
+
+// Lamé parameters
+real lambda = E*nu/((1+nu)*(1-2*nu));
+real mu = E/(2*(1+nu));
+
+// Simulation parameters
+real radius = 0.5;      // Cloth radius (m)
+int n = 40;             // Mesh resolution
+int maxiter = 150;       // Max Newton-Raphson iterations
+real tol = 1e-6;        // Convergence tolerance
+int nsteps = 50;        // Number of time steps
+real loadFactor = 0.0;  //loadFactor to increase load applied at each step
+
+
+// Create 2D mesh in XY plane (reference configuration)
+border C(t=0, 2*pi) { x = radius*cos(t); y = radius*sin(t); label=1; }
+mesh Th2d = buildmesh(C(n));
+
+// Create surface mesh (a 2D manifold in 3D space)
+meshS ThS = movemesh23(Th2d, transfo=[x, y, 0]);
+
+// Finite element spaces
+fespace Vh(ThS, P1);
+fespace Vh3(ThS, [P1, P1, P1]); // Vector space for displacement
+
+// Current and reference coordinates
+Vh3 [u1, u2, u3] = [0, 0, 0];     // Current displacement
+Vh3 [du1, du2, du3] = [0, 0, 0];  // Displacement increment
+Vh3 [Du1, Du2, Du3] = [0, 0, 0];  // Displacement increment accumulated over the iteration
+Vh3 [v1, v2, v3] = [0, 0, 0];     // Test functions
+
+// Reference coordinates (define after mesh is created)
+Vh X, Y, Z;
+X = x; Y = y; Z = z;
+
+
+
+//Components of 2nd Piola-Kirchoff tensor at time t (constant per element)
+Vh S11, S22, S12;
+real prestress = 1e-6*E; // A small initial tension to stabilize the system
+S11 = prestress;       // Initial tension in the x-direction
+S22 = prestress;       // Initial tension in the y-direction
+S12 = 0;               // No initial shear stress
+
+//Incremental 2PK stress tensor
+macro oS11(du1, du2, du3, u1, u2, u3) (lambda*tre(du1, du2, du3, u1, u2, u3) + 2*mu*e11(du1, du2, du3, u1, u2, u3)) //
+macro oS22(du1, du2, du3, u1, u2, u3) (lambda*tre(du1, du2, du3, u1, u2, u3) + 2*mu*e22(du1, du2, du3, u1, u2, u3)) //
+macro oS12(du1, du2, du3, u1, u2, u3) (2*mu*e12(du1, du2, du3, u1, u2, u3)) //
+
+
+// Incremental linear strain (e_ij)
+macro e11(du1,du2,du3, u1,u2,u3) (dx(du1) + dx(u1)*dx(du1) + dx(u2)*dx(du2) + dx(u3)*dx(du3)) //
+macro e22(du1,du2,du3, u1,u2,u3) (dy(du2) + dy(u1)*dy(du1) + dy(u2)*dy(du2) + dy(u3)*dy(du3)) //
+macro e12(du1,du2,du3, u1,u2,u3) (0.5*(dy(du1) + dx(du2)                                       
+                            + (dx(du1)*dy(u1) + dx(u1)*dy(du1))                       
+                            + (dx(du2)*dy(u2) + dx(u2)*dy(du2))                       
+                            + (dx(du3)*dy(u3) + dx(u3)*dy(du3)) )) //
+macro tre(du1,du2,du3, u1,u2,u3) (e11(du1,du2,du3,u1,u2,u3) + e22(du1,du2,du3,u1,u2,u3)) //
+
+// Variation of linear strain (de_ij)
+macro de11(v1,v2,v3, u1,u2,u3) (dx(v1) + dx(u1)*dx(v1) + dx(u2)*dx(v2) + dx(u3)*dx(v3)) //
+macro de22(v1,v2,v3, u1,u2,u3) (dy(v2) + dy(u1)*dy(v1) + dy(u2)*dy(v2) + dy(u3)*dy(v3)) //
+macro de12(v1,v2,v3, u1,u2,u3) (0.5*(dy(v1) + dx(v2)                                         
+                          + (dx(v1)*dy(u1) + dx(u1)*dy(v1))                         
+                          + (dx(v2)*dy(u2) + dx(u2)*dy(v2))                         
+                          + (dx(v3)*dy(u3) + dx(u3)*dy(v3)) )) //
+
+// Variation of incremental nonlinear strain (dnij)
+macro dn11(du1, du2, du3, v1, v2, v3) (dx(v1)*dx(du1) + dx(v2)*dx(du2) + dx(v3)*dx(du3)) //
+macro dn12(du1, du2, du3, v1, v2, v3) (0.5*(dx(v1)*dy(du1) + dx(v2)*dy(du2) 
+                + dx(v3)*dy(du3) + dy(v1)*dx(du1) 
+                + dy(v2)*dx(du2) + dy(v3)*dx(du3))) // //dn21 is the same
+macro dn22(du1, du2, du3, v1, v2, v3) (dy(v1)*dy(du1) + dy(v2)*dy(du2) + dy(v3)*dy(du3)) //
+
+//variational form to solve residual forces
+varf residual([du1,du2,du3], [v1,v2,v3]) =
+    // Internal forces
+    - int2d(ThS)(
+        thickness * ( 
+             S11*de11(v1, v2, v3, u1, u2, u3)
+           + S22*de22(v1, v2, v3, u1, u2, u3)
+           + 2*S12*de12(v1, v2, v3, u1, u2, u3)
+        )
+      )
+    // External forces
+    + int2d(ThS)(
+        loadFactor * rho*g*thickness * v3
+      )
+    + on(1, du1=0, du2=0, du3=0);
+
+//variational form to solve tangent stiffness matrix
+varf tangent([du1,du2,du3], [v1,v2,v3]) =
+    int2d(ThS)(
+        thickness * (
+            // Material stiffness part (Cijrs : ers : deij)
+            lambda * (de11(v1,v2,v3, u1, u2, u3) + de22(v1,v2,v3, u1, u2, u3)) * (e11(du1,du2,du3, u1, u2, u3) + e22(du1,du2,du3, u1, u2, u3))
+            + 2*mu * ( de11(v1,v2,v3, u1, u2, u3)*e11(du1,du2,du3, u1, u2, u3)
+                     + de22(v1,v2,v3, u1, u2, u3)*e22(du1,du2,du3, u1, u2, u3)
+                     + 2*de12(v1,v2,v3, u1, u2, u3)*e12(du1,du2,du3, u1, u2, u3) )
+
+            // Non-linear part of stiffness matrix (Sij : dnij)
+            + S11 * dn11(du1, du2, du3, v1, v2, v3)
+            + S22 * dn22(du1, du2, du3, v1, v2, v3)
+            + 2*S12 * dn12(du1, du2, du3, v1, v2, v3)
+        )
+    )
+    + on(1, du1=0, du2=0, du3=0);
+
+
+//Main Newton-Raphson iteration loop
+for (int step = 1; step <= nsteps; ++step) {
+
+    //gradually increase load
+    loadFactor = step / real(nsteps);
+    cout<<"Load step: "<<step<<endl;
+
+    //reset incremental displacements
+    du1[] = 0;
+    Du1[] = 0;
+    for (int iter = 0; iter < maxiter; ++iter) {
+    
+        real[int] R = residual(0, Vh3);
+        real normR = R.l2;
+        if (iter > 0 && normR > 1e6){
+            cout << "  !!! WARNING: Residual is exploding. Likely divergence." << endl;
+        }
+
+      
+        matrix K = tangent(Vh3, Vh3, solver=UMFPACK);
+        real[int] deltaU = K^-1 * R; //solve for incremental displacement in this iteration
+
+        du1[] = deltaU; 
+        u1[] += du1[];   //update displacement using the incremental displacement
+        Du1[] +=  du1[]; //update the incremental displcaement accumulated during this iteration (to use while adding to the 2PK tensor at the end of the iteration)
+        
+        if (normR < tol) {
+            cout << "  -> CONVERGED" << endl;
+            //update 2PK tensor using total accumulated displacement in this iteration
+            Vh deltaS11 = oS11(Du1, Du2, Du3, u1, u2,u3); 
+            Vh deltaS22 = oS22(Du1, Du2, Du3, u1, u2,u3);
+            Vh deltaS12 = oS12(Du1, Du2, Du3, u1, u2,u3);
+
+            S11[] += deltaS11[];  
+            S22[] += deltaS22[];
+            S12[] += deltaS12[];
+            break;
+        }
+        if(iter==maxiter-1){
+            cout<<"  WARNING: Max iterations reached without convergence."<<endl;
+        }
+  
+    }
+}
+
+cout << "Simulation complete!" << endl;
+
+//plot displacements component wise
+plot(u3, cmm="Final Z Displacement (u3)", wait=true, value=true);
+plot(u2, cmm="Final Y Displacement (u2)", wait=true, value=true);
+plot(u1, cmm="Final X Displacement (u1)", wait=true, value=true);
+
+real scale = 1e5;
+
+meshS ThSdeformed = movemeshS(ThS, transfo=[x+u1, y+u2, z+u3*scale]);
+medit("Final Deformed Cloth", ThSdeformed, wait=true);
