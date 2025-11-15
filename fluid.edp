@@ -1,0 +1,299 @@
+load "msh3"
+load "tetgen"
+load "medit"
+include "MeshSurface.idp"
+
+// Mesh Parameters
+real brainRadius = 1;
+real brainMeshSize = 0.4;
+
+real tumourRadius = 0.1;
+real tumourMeshSize = 0.4;
+
+//Simulation Parameters
+real rho = 1036;    // Density (e.g., for brain tissue)
+real E = 3000;      // Young's Modulus (Pa)
+real nu = 0.4925;     // Poisson's Ratio
+real g = -9.81;  
+
+real Tfinal = 0.1;
+real dt = 0.01;
+real nsteps=Tfinal/dt;
+// Lamé parameters
+real mu = E / (2 * (1 + nu));
+real lambda = E * nu / ((1 + nu) * (1 - 2 * nu));
+
+real alpha = 0.02;   // Mass-proportional damping coefficient
+real beta = 0.02;
+
+// Newton-Raphson Solver Parameters
+int maxiter = 50;
+real tol = 1e-6;
+
+//fluid region
+real rhoFluid = 1000;  
+// The outer sphere, defining region 1
+meshS brain = Sphere(brainRadius, brainMeshSize, 10, 0, 0, 0, 1);
+
+// The inner sphere, marked as a hole, defining region 2
+meshS tumour = Sphere(tumourRadius, tumourMeshSize, 20, 0.3, 0.3, 0.3, 1);
+
+meshS consolidatedMesh = brain + tumour;
+
+real voltet = (brainMeshSize^3)/6.;
+cout << "voltet = " << voltet << endl;
+
+real[int] domain = [0.0, 0.0, 0.0, 1, voltet,   // Seed for brain region
+                    0.3, 0.3, 0.3, 2, voltet];  // Seed for tumour region
+
+mesh3 Th = tetg(consolidatedMesh, switch="pqaAAYYQ", nbofregions=2, regionlist=domain);
+
+// fespace Ph(Th, P0); //constant discontinuous functions / element
+// Ph reg=region; //defined the P0 function associated to region number
+// plot(reg, fill=true, wait=true, value=true);
+
+fespace Vh(Th, P1);
+fespace Vh3(Th, [P1, P1, P1]); // Vector space for displacement
+
+// Current and reference coordinates
+Vh3 [u1, u2, u3] = [0, 0, 0];     // Current displacement
+Vh3 [du1, du2, du3] = [0, 0, 0];  // Displacement increment
+Vh3 [Du1, Du2, Du3] = [0, 0, 0];  // Displacement increment accumulated over the iteration
+Vh3 [v1, v2, v3] = [0, 0, 0]; //Test functions
+Vh3 [ut1, ut2, ut3] = [0, 0, 0];     // Displacement from the previous time step
+Vh3 [at1, at2, at3] = [0, 0, 0];     // acceleration from previous time step
+Vh3 [vt1, vt2, vt3] = [0, 0, 0];     // velocity from prev time step
+Vh3 [vk1, vk2, vk3] = [0, 0, 0];     //current guess for vel at iteration k in NR
+Vh3 [ak1, ak2, ak3] = [0, 0, 0];     //current guess for acc at iteration k in NR
+Vh3 [an1, an2, an3] = [0, 0, 0];     //term to update mass matrix
+// Vh3 [f1, f2, f3] = [0, 0, 0]; //fluid force acting on the node at a particular time step
+Vh f1=0;
+Vh f2=0;
+Vh f3=0;
+
+Vh S11, S22, S12, S33, S13, S23 = 0; // Stress components
+
+macro crossProductX(Ax, Ay, Az, Bx, By, Bz) (Ay*Bz - Az*By)//
+macro crossProductY(Ax, Ay, Az, Bx, By, Bz) (Az*Bx - Ax*Bz)//
+macro crossProductZ(Ax, Ay, Az, Bx, By, Bz) (Ax*By - Ay*Bx)//
+
+
+real csfHeight = 1.0;
+
+int nbe = Th.nbe;
+
+cout<<"Number of boundary elements: "<<nbe<<endl;
+Vh xDeformed = x+u1;
+Vh yDeformed = y+u2;
+Vh zDeformed = z+u3;
+for(int i=0;i<nbe;i++){
+
+
+    //Getting the indices of the vertices for this surface triangle
+    int i1 = Th.be(i)[0];
+    int i2 = Th.be(i)[1];
+    int i3 = Th.be(i)[2];
+    // cout<<"Indices: "<<i1<<" "<<i2<<" "<<i3<<endl;
+
+    //Getting the z values for those vertices
+    real z1 = zDeformed[][i1];
+    real z2 = zDeformed[][i2];
+    real z3 = zDeformed[][i3];
+
+    real x1 = xDeformed[][i1];
+    real x2 = xDeformed[][i2];
+    real x3 = xDeformed[][i3];
+
+    real y1 = yDeformed[][i1];
+    real y2 = yDeformed[][i2];
+    real y3 = yDeformed[][i3];
+
+    real r1 = x1*x1+ y1*y1 + z1*z1;
+    real r2 = x2*x2 + y2*y2 + z2*z2;
+    real r3 = x3*x3 + y3*y3 + z3*z3;
+    if((r1 + r2 + r3)<2.5){continue;}
+    // cout<<"Triangle "<<i<<"V1: "<<r1<<" V2: "<<r2<<" V3: "<<r3<<endl;
+
+    int submergedCount=0;
+    if(z1<=csfHeight) submergedCount++;
+    if(z2<=csfHeight) submergedCount++;
+    if(z3<=csfHeight) submergedCount++;
+
+    //getting vertex positions for the three vertices
+    real[int] j1 = [xDeformed[][i1], yDeformed[][i1], z1]; 
+    real[int] j2 = [xDeformed[][i2], yDeformed[][i2], z2];
+    real[int] j3 = [xDeformed[][i3], yDeformed[][i3], z3];
+
+    real[int] v1 = [j2[0]-j1[0], j2[1]-j1[1], j2[2]-j1[2]];
+    real[int] v2 = [j3[0]-j1[0], j3[1]-j1[1], j3[2]-j1[2]];
+
+    real n1 = crossProductX(v1[0], v1[1], v1[2], v2[0], v2[1], v2[2]);
+    real n2 = crossProductY(v1[0], v1[1], v1[2], v2[0], v2[1], v2[2]);
+    real n3 = crossProductZ(v1[0], v1[1], v1[2], v2[0], v2[1], v2[2]);
+    real mag = sqrt(n1*n1 + n2*n2 + n3*n3);
+    real[int] n = [-n1/mag, -n2/mag, -n3/mag]; //unit normal vector
+
+
+    //All three nodes submerged
+    if(submergedCount==3){
+
+        //calculating centroid
+        real g1 = j1[0] + j2[0] + j3[0];
+        real g2 = j1[1] + j2[1] + j3[1];
+        real g3 = j1[2] + j2[2] + j3[2];
+
+        real[int] G = [g1/3, g2/3, g3/3];
+        
+        
+
+        real S = 0.5*mag;
+
+        real fluidFactor = -(rhoFluid)*abs(g)*(csfHeight - G[2])*S;
+
+
+        real[int] fluidForce = [fluidFactor * n[0], fluidFactor * n[1], fluidFactor*n[2]];
+
+        real h1 = csfHeight - z1;
+        real h2 = csfHeight - z2;
+        real h3 = csfHeight - z3;
+        real hSum = h1 + h2 + h3;
+
+        //updating fluid force for this time step
+        if(hSum > 1e-9){
+            f1[][i1] += fluidForce[0] * h1/hSum;
+            f2[][i1] += fluidForce[1] * h1/hSum;
+            f3[][i1] += fluidForce[2] * h1/hSum;
+
+            f1[][i2] += fluidForce[0] * h2/hSum;
+            f2[][i2] += fluidForce[1] * h2/hSum;
+            f3[][i2] += fluidForce[2] * h2/hSum;
+
+            f1[][i3] += fluidForce[0] * h3/hSum;
+            f2[][i3] += fluidForce[1] * h3/hSum;
+            f3[][i3] += fluidForce[2] * h3/hSum;
+        }
+
+    }
+
+    if(submergedCount==2){
+        real[int] psub1 = [0, 0, 0];
+        real[int] psub2 = [0, 0, 0];
+        real[int] pair = [0, 0, 0];
+
+        int isub1, isub2 = 0;
+
+        if (z1 > csfHeight) { pair = j1; psub1 = j2; isub1 = i2; psub2 = j3; isub2 = i3;}
+        else if (z2 > csfHeight) { pair = j2; psub1 = j1; isub1 = i1; psub2 = j3; isub2 = i3;}
+        else { pair = j3; psub1 = j1; isub1 = i1; psub2 = j2; isub2 = i2;}
+
+        // Calculate intersection points on the edges from submerged vertices to the air vertex
+        real t1 = (csfHeight - psub1[2]) / (pair[2] - psub1[2]);
+
+        real[int] pint1 = [psub1[0] + t1*(pair[0] - psub1[0]), psub1[1] + t1*(pair[1] - psub1[1]), psub1[2] + t1*(pair[2] - psub1[2])];
+
+        real t2 = (csfHeight - psub2[2]) / (pair[2] - psub2[2]);
+
+        real[int] pint2 = [psub2[0] + t2*(pair[0] - psub2[0]), psub2[1] + t2*(pair[1] - psub2[1]), psub2[2] + t2*(pair[2] - psub2[2])];
+
+        // Force on Triangle A
+        real [int] Ga = [(psub1[0] + psub2[0] + pint1[0])/3., (psub1[1] + psub2[1] + pint1[1])/3., (psub1[2] + psub2[2] + pint1[2])/3.];
+
+        real[int] vA1 = [psub2[0] - psub1[0], psub2[1] - psub1[1], psub2[2] - psub1[2]];
+        real[int] vA2 = [pint1[0] - psub1[0], pint1[1] - psub1[1], pint1[2] - psub1[2]];
+
+        real Sa1 = crossProductX(vA1[0], vA1[1], vA1[2], vA2[0], vA2[1], vA2[2]);
+        real Sa2 = crossProductY(vA1[0], vA1[1], vA1[2], vA2[0], vA2[1], vA2[2]);
+        real Sa3 = crossProductZ(vA1[0], vA1[1], vA1[2], vA2[0], vA2[1], vA2[2]);
+
+        real Sa = 0.5 * sqrt(Sa1*Sa1 + Sa2*Sa2 + Sa3*Sa3);
+        real fluidFactorA = -rhoFluid *abs(g) * (csfHeight-Ga[2])*Sa;
+        real[int] fluidForceA = [fluidFactorA * n[0], fluidFactorA * n[1], fluidFactorA*n[2]];
+
+        // Force on Triangle B
+        real [int] Gb = [(pint2[0] + psub2[0] + pint1[0])/3., (pint2[1] + psub2[1] + pint1[1])/3., (pint2[2] + psub2[2] + pint1[2])/3.];
+
+        real[int] vB1 = [pint2[0] - psub2[0], pint2[1] - psub2[1], pint2[2] - psub2[2]];
+        real[int] vB2 = [pint1[0] - psub2[0], pint1[1] - psub2[1], pint1[2] - psub2[2]];
+
+        real Sb1 = crossProductX(vB1[0], vB1[1], vB1[2], vB2[0], vB2[1], vB2[2]);
+        real Sb2 = crossProductY(vB1[0], vB1[1], vB1[2], vB2[0], vB2[1], vB2[2]);
+        real Sb3 = crossProductZ(vB1[0], vB1[1], vB1[2], vB2[0], vB2[1], vB2[2]);
+
+        real Sb = 0.5 * sqrt(Sb1*Sb1 + Sb2*Sb2 + Sb3*Sb3);
+        real fluidFactorB = -rhoFluid *abs(g) * (csfHeight-Gb[2])*Sb;
+        real[int] fluidForceB = [fluidFactorB * n[0], fluidFactorB * n[1], fluidFactorB*n[2]];
+
+        real h1 = csfHeight - psub1[2];
+        real h2 = csfHeight - psub2[2];
+        real hSum = h1 + h2;
+        if (hSum > 1e-9) {
+            f1[][isub1] += fluidForceA[0] * h1/hSum;
+            f2[][isub1] += fluidForceA[1] * h1/hSum;
+            f3[][isub1] += fluidForceA[2] * h1/hSum;
+
+            f1[][isub2] += fluidForceA[0] * h2/hSum + fluidForceB[0];
+            f2[][isub2] += fluidForceA[1] * h2/hSum + fluidForceB[1];
+            f3[][isub2] += fluidForceA[2] * h2/hSum + fluidForceB[2];
+        }
+
+
+    }
+    if(submergedCount==1){
+        real[int] psub = [0, 0, 0];
+        real[int] pair1 = [0, 0, 0];
+        real[int] pair2 = [0, 0, 0];
+        int isub;
+
+        // Find which vertex is submerged
+        if (z1 <= csfHeight) { psub = j1; isub = i1; pair1 = j2; pair2 = j3;}
+        else if (z2 <= csfHeight) { psub = j2; isub = i2; pair1 = j1; pair2 = j3;}
+        else { psub = j3; isub = i3; pair1 = j1; pair2 = j2;}
+
+        real t1 = (csfHeight - psub[2]) / (pair1[2] - psub[2]);
+        real[int] pint1 = [psub[0] + t1 * (pair1[0] - psub[0]), psub[1] + t1 * (pair1[1] - psub[1]), psub[2] + t1 * (pair1[2] - psub[2])];
+
+        real t2 = (csfHeight - psub[2]) / (pair2[2] - psub[2]);
+        real[int] pint2 = [psub[0] + t2 * (pair2[0] - psub[0]), psub[1] + t2 * (pair2[1] - psub[1]), psub[2] + t2 * (pair2[2] - psub[2])];
+
+        real[int] G = [(psub[0] + pint2[0] + pint1[0])/3., (psub[1] + pint2[1] + pint1[1])/3., (psub[2] + pint2[2] + pint1[2])/3.];
+
+        real [int] v1 = [pint1[0] - psub[0], pint1[1] - psub[1], pint1[2] - psub[2]];
+        real [int] v2 = [pint2[0] - psub[0], pint2[1] - psub[1], pint2[2] - psub[2]];
+
+        real S1 = crossProductX(v1[0], v1[1], v1[2], v2[0], v2[1], v2[2]);
+        real S2 = crossProductY(v1[0], v1[1], v1[2], v2[0], v2[1], v2[2]);
+        real S3 = crossProductZ(v1[0], v1[1], v1[2], v2[0], v2[1], v2[2]);
+
+        real S = 0.5 * sqrt(S1*S1 + S2*S2 + S3*S3);
+
+        real fluidFactor = -rhoFluid * abs(g) * (csfHeight - G[2]) * S;
+
+        real[int] fluidForce = [fluidFactor * n[0], fluidFactor * n[1], fluidFactor*n[2]];
+        
+        f1[][isub] += fluidForce[0];
+        f2[][isub] += fluidForce[1];
+        f3[][isub] += fluidForce[2];
+
+    }
+
+
+}
+
+medit("Fluid Force Vectors", Th, f1, wait=true);
+
+// for(int i=0;i<Vh.ndof;i++){
+//     if(zDeformed[][i]<=0){
+//     real dist = sqrt(xDeformed[][i]*xDeformed[][i] + yDeformed[][i]*yDeformed[][i] + zDeformed[][i]*zDeformed[][i]);
+//     cout<<i<<" Dist: "<<dist<<" z: "<<zDeformed[][i]<<" f3:"<<f1[][i]<<" "<<f1[][Vh.ndof+i]<<" "<<f1[][Vh.ndof*2+i]<<endl;
+//     // cout<<i<<" Dist: "<<dist<<" z: "<<zDeformed[][i]<<" f3:"<<f1[][i*3]<<" "<<f1[][i*3+1]<<" "<<f1[][i*3+2]<<endl;
+
+//     }
+// }
+
+
+// Plot the force vectors on the 3D mesh
+
+// Save the mesh
+
+
+// Execute ffmedit
