@@ -2,7 +2,7 @@ load "msh3"
 load "tetgen"
 load "medit"
 include "MeshSurface.idp"
-// load "PETSc"
+
 
 // Mesh Parameters
 real brainRadius = 1;
@@ -176,7 +176,7 @@ varf residual([du1,du2,du3], [v1,v2,v3]) =
 
     + int3d(Th)(f1*v1 + f2*v2 + f3*v3)
 
-    + on(10, du1=0, du2=0, du3=0);
+    + on((z<0), du1=0, du2=0, du3=0);
     
 
 varf tangent([du1,du2,du3], [v1,v2,v3]) =
@@ -195,7 +195,7 @@ varf tangent([du1,du2,du3], [v1,v2,v3]) =
         + 2*S12*dn12(du1,du2,du3, v1,v2,v3) + 2*S13*dn13(du1,du2,du3, v1,v2,v3) + 2*S23*dn23(du1,du2,du3, v1,v2,v3)
     )
 
-    + on(10, du1=0, du2=0, du3=0);
+    + on((z<0), du1=0, du2=0, du3=0);
 
 func real calculateFluidForce(real csfHeight) {
     Vh xDeformed = x+u1;
@@ -401,7 +401,7 @@ func real calculateFluidForce(real csfHeight) {
 
     }
 
-    medit("Fluid Force Vectors", Th, f1, wait=true);
+    // medit("Fluid Force Vectors", Th, f1, wait=true);
 
 }
 
@@ -412,11 +412,14 @@ for (int step = 1; step <= nsteps; ++step) {
     cout << "Time step: " << step << " (t = " << t << ")" << endl;
 
     real currentCsfHeight = 1.0 + (cutHeight - 1.0) * (t / Tfinal);
+
     cout << "  Current CSF Height = " << currentCsfHeight << endl;
+    
 
     calculateFluidForce(currentCsfHeight);
 
     matrix Ktangent = tangent(Vh3, Vh3, solver=UMFPACK);
+    // matrix Ktangent = tangent(Vh3, Vh3, solver=sparsesolver, master=-1);
     matrix Keff = (1. + beta * 2./dt) * Ktangent + (4./(dt*dt) + alpha * 2./dt) * M;  //Included damping C = alpha*M + beta*K
 
     // 2. THIS IS THE CRITICAL FIX:
@@ -425,6 +428,7 @@ for (int step = 1; step <= nsteps; ++step) {
 
     for (int iter = 0; iter < maxiter; ++iter) {
         
+            
         real[int] R = residual(0, Vh3); 
         // R += f1[];
 
@@ -444,10 +448,12 @@ for (int step = 1; step <= nsteps; ++step) {
         
         real normR = R.l2;
         cout << "  NR Iter: " << iter << ", Residual Norm = " << normR << endl;
+        
 
         // 3. CHECK FOR CONVERGENCE
         if (normR < tol) {
             cout << "  -> CONVERGED" << endl;
+            
             
             // Update the total stress tensor.
             // The displacement increment for the whole step is u1[] - un1[].
@@ -491,14 +497,15 @@ for (int step = 1; step <= nsteps; ++step) {
         
         if(iter == maxiter - 1){
             cout << "  WARNING: Max iterations reached without convergence." << endl;
+            
         }
     }
 }
 
-
 plot(u1, cmm="Final X Displacement (u1)", value=true, fill=true, wait=true);
 plot(u2, cmm="Final Y Displacement (u2)", value=true, fill=true, wait=true);
 plot(u3, cmm="Final Z Displacement (u3)", value=true, fill=true, wait=true);
+
 
 
 // 2. Plotting the Magnitude of the Displacement Vector
@@ -508,6 +515,7 @@ plot(u3, cmm="Final Z Displacement (u3)", value=true, fill=true, wait=true);
 fespace Vh1(Th, P1);
 Vh1 umagnitude = sqrt(u1^2 + u2^2 + u3^2);
 plot(umagnitude, cmm="Displacement Magnitude", value=true, fill=true, wait=true);
+
 
 
 // 3. Visualizing the Deformed Mesh using movemesh

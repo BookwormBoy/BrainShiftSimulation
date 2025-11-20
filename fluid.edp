@@ -78,7 +78,7 @@ macro crossProductY(Ax, Ay, Az, Bx, By, Bz) (Az*Bx - Ax*Bz)//
 macro crossProductZ(Ax, Ay, Az, Bx, By, Bz) (Ax*By - Ay*Bx)//
 
 
-real csfHeight = 1.0;
+real csfHeight = -0.9;
 
 int nbe = Th.nbe;
 
@@ -279,7 +279,7 @@ for(int i=0;i<nbe;i++){
 
 }
 
-medit("Fluid Force Vectors", Th, f1, wait=true);
+medit("Fluid Force Vectors", Th, f3, wait=true);
 
 // for(int i=0;i<Vh.ndof;i++){
 //     if(zDeformed[][i]<=0){
