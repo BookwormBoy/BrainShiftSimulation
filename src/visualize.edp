@@ -1,0 +1,38 @@
+load "gmsh"
+load "iovtk"
+
+mesh3 Th = readmesh3("brain_initial.mesh");
+mesh3 ThDeformed = readmesh3("brain_deformed.mesh");
+
+Th = trunc(Th, (region == 20));
+ThDeformed = trunc(ThDeformed, (region == 20));
+
+// Scale initial from mm to meters
+Th = movemesh3(Th, transfo=[x/1000.0, y/1000.0, z/1000.0]);
+plot(Th, cmm="original", wait = true);
+plot(ThDeformed, cmm="deformed", wait = true);
+plot(Th, ThDeformed, cmm="deformed", wait = true);
+
+
+
+// Recompute coords after scaling
+fespace Vh(Th, P1);
+fespace VhD(ThDeformed, P1);
+Vh XX = x, YY = y, ZZ = z;
+VhD XXd = x, YYd = y, ZZd = z;
+
+real minY = YY[].min;
+real minYd = YYd[].min;
+real minX = XX[].min;
+
+cout << "minY initial: " << minY << endl;
+cout << "minY deformed: " << minYd << endl;
+
+real yOffset = minYd - minY;
+real xOffset = 0.15;
+
+// Th = movemesh3(Th, transfo=[x + xOffset, y + yOffset, z]);
+
+int[int] order = [1];
+savevtk("brain_initial.vtk", Th, order=order);
+savevtk("brain_deformed.vtk", ThDeformed, order=order);

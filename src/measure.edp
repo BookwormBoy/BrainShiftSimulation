@@ -1,0 +1,26 @@
+load "gmsh"
+mesh3 Th = gmshloadS("brain_initial.mesh");
+// Scale mm to meters
+Th = movemesh3(Th, transfo=[x/1000.0, y/1000.0, z/1000.0]);
+Th = movemesh3(Th, transfo=[-z, x, -y]);
+
+
+// Use a P1 Finite Element Space to capture coordinates
+fespace Vh(Th, P1);
+Vh XX = x, YY = y, ZZ = z;
+
+// Get Min and Max coordinates
+real minX = XX[].min, maxX = XX[].max;
+real minY = YY[].min, maxY = YY[].max;
+real minZ = ZZ[].min, maxZ = ZZ[].max;
+
+// Calculate Size
+real width  = maxX - minX;
+real depth  = maxY - minY;
+real height = maxZ - minZ;
+
+cout << "--- Brain Dimensions ---" << endl;
+cout << "X (Width):  " << minX << " to " << maxX << " (Size: " << width << ")" << endl;
+cout << "Y (Depth):  " << minY << " to " << maxY << " (Size: " << depth << ")" << endl;
+cout << "Z (Height): " << minZ << " to " << maxZ << " (Size: " << height << ")" << endl;
+cout << "------------------------" << endl;

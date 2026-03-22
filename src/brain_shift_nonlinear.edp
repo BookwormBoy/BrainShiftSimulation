@@ -1,0 +1,664 @@
+load "msh3"
+load "tetgen"
+load "medit"
+load "gmsh"
+include "MeshSurface.idp"
+
+
+// Mesh Parameters
+real brainRadius = 0.07;
+real brainMeshSize = 0.002;
+
+real tumourRadius = 0.01;
+real tumourMeshSize = 0.01;
+
+//Simulation Parameters
+real rho = 1036;    // Density of brain
+real E = 7070;      // young's modulus (Pa)
+real nu = 0.4925;   // poisson's ratio
+real g = -9.81;  
+
+real Tfinal = 0.05;
+real dt = 0.01;
+real nsteps=Tfinal/dt;
+// Lamé parameters
+real mu = E / (2 * (1 + nu));
+real lambda = E * nu / ((1 + nu) * (1 - 2 * nu));
+
+real alpha = 0.02;   // Mass-proportional damping coefficient
+real beta = 0.02;
+
+// Newton-Raphson Solver Parameters
+int maxiter = 100;
+real tol = 1e-4;
+
+//fluid region
+real rhoFluid = 1000;  
+real hFluid = 0.0;
+
+mesh3 Th;
+Th = gmshload3("../models/brain_tumour_merged.msh");
+Th = movemesh3(Th, transfo=[x/1000.0, y/1000.0, z/1000.0]);
+Th = movemesh3(Th, transfo=[-z, x, -y]);
+plot(Th, wait=1);
+
+fespace Vh(Th, P1);
+fespace Vh3(Th, [P1, P1, P1]); // Vector space for displacement
+
+// Current and reference coordinates
+Vh3 [u1, u2, u3] = [0, 0, 0];     // Current displacement
+Vh3 [du1, du2, du3] = [0, 0, 0];  // Displacement increment
+Vh3 [Du1, Du2, Du3] = [0, 0, 0];  // Displacement increment accumulated over the iteration
+Vh3 [v1, v2, v3] = [0, 0, 0]; //Test functions
+Vh3 [ut1, ut2, ut3] = [0, 0, 0];     // Displacement from the previous time step
+Vh3 [at1, at2, at3] = [0, 0, 0];     // acceleration from previous time step
+Vh3 [vt1, vt2, vt3] = [0, 0, 0];     // velocity from prev time step
+Vh3 [vk1, vk2, vk3] = [0, 0, 0];     //current guess for vel at iteration k in NR
+Vh3 [ak1, ak2, ak3] = [0, 0, 0];     //current guess for acc at iteration k in NR
+Vh3 [an1, an2, an3] = [0, 0, 0];     //term to update mass matrix
+Vh f1=0; //fields to store fluid force
+Vh f2=0;
+Vh f3=0;
+
+
+real csfHeight = 1.0;
+real cutHeight = 0.0;
+
+real occipitalPin = -3*brainRadius/5;
+real brainStemPin = 3*brainRadius/5;
+ 
+
+//Tensor macros
+
+//Incremental 2PK stress tensor
+macro oS11(du1,du2,du3, u1,u2,u3) (lambda*tre(du1,du2,du3,u1,u2,u3) + 2*mu*e11(du1,du2,du3,u1,u2,u3)) //
+macro oS22(du1,du2,du3, u1,u2,u3) (lambda*tre(du1,du2,du3,u1,u2,u3) + 2*mu*e22(du1,du2,du3,u1,u2,u3)) //
+macro oS33(du1,du2,du3, u1,u2,u3) (lambda*tre(du1,du2,du3,u1,u2,u3) + 2*mu*e33(du1,du2,du3,u1,u2,u3)) //
+
+macro oS12(du1,du2,du3, u1,u2,u3) (2*mu*e12(du1,du2,du3,u1,u2,u3)) //
+macro oS13(du1,du2,du3, u1,u2,u3) (2*mu*e13(du1,du2,du3,u1,u2,u3)) //
+macro oS23(du1,du2,du3, u1,u2,u3) (2*mu*e23(du1,du2,du3,u1,u2,u3)) //
+
+
+// Variation of linear strain (deij)
+macro de11(v1,v2,v3) dx(v1) //
+macro de22(v1,v2,v3) dy(v2) //
+macro de33(v1,v2,v3) dz(v3) //
+macro de12(v1,v2,v3) (0.5*(dy(v1) + dx(v2))) //
+macro de13(v1,v2,v3) (0.5*(dz(v1) + dx(v3))) //
+macro de23(v1,v2,v3) (0.5*(dz(v2) + dy(v3))) //
+
+// Linear incremental Green-Lagrange (small-strain part)
+
+// normal strains from increment du
+macro eps11(du1,du2,du3) (dx(du1)) //
+macro eps22(du1,du2,du3) (dy(du2)) //
+macro eps33(du1,du2,du3) (dz(du3)) //
+
+// shear strains from increment du
+macro eps12(du1,du2,du3) (0.5*(dy(du1)+dx(du2))) //
+macro eps13(du1,du2,du3) (0.5*(dz(du1)+dx(du3))) //
+macro eps23(du1,du2,du3) (0.5*(dz(du2)+dy(du3))) //
+
+// normal variation wrt test function v
+macro deps11(v1,v2,v3) (dx(v1)) //
+macro deps22(v1,v2,v3) (dy(v2)) //
+macro deps33(v1,v2,v3) (dz(v3)) //
+
+// shear variation wrt test function v
+macro deps12(v1,v2,v3) (0.5*(dy(v1)+dx(v2))) //
+macro deps13(v1,v2,v3) (0.5*(dz(v1)+dx(v3))) //
+macro deps23(v1,v2,v3) (0.5*(dz(v2)+dy(v3))) //
+
+
+macro traceeps(du1,du2,du3) (dx(du1)+dy(du2)+dz(du3)) //
+macro tracedeps(v1,v2,v3) (dx(v1)+dy(v2)+dz(v3)) //
+
+
+//non linear strain macros
+
+macro deta11(du1,du2,du3, v1,v2,v3)
+( dx(v1)*dx(du1) + dx(v2)*dx(du2) + dx(v3)*dx(du3) ) //
+
+macro deta22(du1,du2,du3, v1,v2,v3)
+( dy(v1)*dy(du1) + dy(v2)*dy(du2) + dy(v3)*dy(du3) ) //
+
+macro deta33(du1,du2,du3, v1,v2,v3)
+( dz(v1)*dz(du1) + dz(v2)*dz(du2) + dz(v3)*dz(du3) ) //
+
+macro deta12(du1,du2,du3, v1,v2,v3)
+( 0.5*( dx(v1)*dy(du1) + dx(v2)*dy(du2) + dx(v3)*dy(du3)
+      + dy(v1)*dx(du1) + dy(v2)*dx(du2) + dy(v3)*dx(du3) ) ) //
+
+macro deta13(du1,du2,du3, v1,v2,v3)
+( 0.5*( dx(v1)*dz(du1) + dx(v2)*dz(du2) + dx(v3)*dz(du3)
+      + dz(v1)*dx(du1) + dz(v2)*dx(du2) + dz(v3)*dx(du3) ) ) //
+
+macro deta23(du1,du2,du3, v1,v2,v3)
+( 0.5*( dy(v1)*dz(du1) + dy(v2)*dz(du2) + dy(v3)*dz(du3)
+      + dz(v1)*dy(du1) + dz(v2)*dy(du2) + dz(v3)*dy(du3) ) ) //
+
+//macros to find 2nd Pila Kirchoff Stress (S)
+
+macro E11(u1,u2,u3)
+( dx(u1) + 0.5*( dx(u1)^2 + dx(u2)^2 + dx(u3)^2 ) ) //
+
+macro E22(u1,u2,u3)
+( dy(u2) + 0.5*( dy(u1)^2 + dy(u2)^2 + dy(u3)^2 ) ) //
+
+macro E33(u1,u2,u3)
+( dz(u3) + 0.5*( dz(u1)^2 + dz(u2)^2 + dz(u3)^2 ) ) //
+
+macro E12(u1,u2,u3)
+( 0.5*( dy(u1) + dx(u2)
+      + dx(u1)*dy(u1)
+      + dx(u2)*dy(u2)
+      + dx(u3)*dy(u3) ) ) //
+
+macro E13(u1,u2,u3)
+( 0.5*( dz(u1) + dx(u3)
+      + dx(u1)*dz(u1)
+      + dx(u2)*dz(u2)
+      + dx(u3)*dz(u3) ) ) //
+
+macro E23(u1,u2,u3)
+( 0.5*( dz(u2) + dy(u3)
+      + dy(u1)*dz(u1)
+      + dy(u2)*dz(u2)
+      + dy(u3)*dz(u3) ) ) //
+macro traceE(u1,u2,u3)
+( E11(u1,u2,u3) + E22(u1,u2,u3) + E33(u1,u2,u3) ) //
+
+macro S11(u1,u2,u3)
+( lambda*traceE(u1,u2,u3) + 2.*mu*E11(u1,u2,u3) ) //
+
+macro S22(u1,u2,u3)
+( lambda*traceE(u1,u2,u3) + 2.*mu*E22(u1,u2,u3) ) //
+
+macro S33(u1,u2,u3)
+( lambda*traceE(u1,u2,u3) + 2.*mu*E33(u1,u2,u3) ) //
+
+macro S12(u1,u2,u3)
+( 2.*mu*E12(u1,u2,u3) ) //
+
+macro S13(u1,u2,u3)
+( 2.*mu*E13(u1,u2,u3) ) //
+
+macro S23(u1,u2,u3)
+( 2.*mu*E23(u1,u2,u3) ) //
+
+
+varf Knonlinear([du1,du2,du3], [v1,v2,v3]) =
+    int3d(Th)(
+          S11(u1, u2, u3)*deta11(du1,du2,du3, v1,v2,v3)
+        + S22(u1, u2, u3)*deta22(du1,du2,du3, v1,v2,v3)
+        + S33(u1, u2, u3)*deta33(du1,du2,du3, v1,v2,v3)
+        + 2.*S12(u1, u2, u3)*deta12(du1,du2,du3, v1,v2,v3)
+        + 2.*S13(u1, u2, u3)*deta13(du1,du2,du3, v1,v2,v3)
+        + 2.*S23(u1, u2, u3)*deta23(du1,du2,du3, v1,v2,v3)
+    );
+
+varf Klinear([du1,du2,du3],[v1,v2,v3]) =
+int3d(Th)(
+    lambda*traceeps(du1,du2,du3)*tracedeps(v1,v2,v3)
+  + 2.*mu*(
+        eps11(du1,du2,du3)*deps11(v1,v2,v3)
+      + eps22(du1,du2,du3)*deps22(v1,v2,v3)
+      + eps33(du1,du2,du3)*deps33(v1,v2,v3)
+      + 2.*(
+            eps12(du1,du2,du3)*deps12(v1,v2,v3)
+          + eps13(du1,du2,du3)*deps13(v1,v2,v3)
+          + eps23(du1,du2,du3)*deps23(v1,v2,v3)
+        )
+    )
+);
+
+
+varf residual([unused1,unused2,unused3], [v1,v2,v3]) =
+
+    //External forces (only gravity for now, fluid force to be added)
+    int3d(Th)( 
+        rho * g * v3
+    );
+
+varf internalForce([unused1,unused2,unused3], [v1,v2,v3]) =
+    int3d(Th)(
+           S11(u1, u2, u3)*de11(v1,v2,v3)
+         + S22(u1, u2, u3)*de22(v1,v2,v3)
+         + S33(u1, u2, u3)*de33(v1,v2,v3)
+         + 2*S12(u1, u2, u3)*de12(v1,v2,v3)
+         + 2*S13(u1, u2, u3)*de13(v1,v2,v3)
+         + 2*S23(u1, u2, u3)*de23(v1,v2,v3)
+    );
+
+
+
+
+macro crossProductX(Ax, Ay, Az, Bx, By, Bz) (Ay*Bz - Az*By)//
+macro crossProductY(Ax, Ay, Az, Bx, By, Bz) (Az*Bx - Ax*Bz)//
+macro crossProductZ(Ax, Ay, Az, Bx, By, Bz) (Ax*By - Ay*Bx)//
+
+
+varf vMass([du1,du2,du3], [v1,v2,v3]) = int3d(Th)(rho * (du1*v1 + du2*v2 + du3*v3));
+
+matrix Mconsistent = vMass(Vh3, Vh3);
+
+real[int] ones(Vh3.ndof);
+ones = 1.0;
+
+real[int] Mlumpeddiag = Mconsistent * ones; 
+
+matrix M = Mlumpeddiag;
+
+cout << "Lumped Mass Matrix M constructed." << endl;
+
+
+func real calculateFluidForce(real csfHeight) {
+    Vh xDeformed = x+u1;
+    Vh yDeformed = y+u2;
+    Vh zDeformed = z+u3;
+
+    f1[] = 0;
+    f2[] = 0;
+    f3[] = 0;
+    // medit("Fluid Force Vectors", Th, f1, wait=true);
+
+
+    int nbe = Th.nbe;
+
+    for(int i=0;i<nbe;i++){
+
+
+        //Getting the indices of the vertices for this surface triangle
+        int i1 = Th.be(i)[0];
+        int i2 = Th.be(i)[1];
+        int i3 = Th.be(i)[2];
+
+        //Getting the z values for those vertices
+        real z1 = zDeformed[][i1];
+        real z2 = zDeformed[][i2];
+        real z3 = zDeformed[][i3];
+
+        real x1 = xDeformed[][i1];
+        real x2 = xDeformed[][i2];
+        real x3 = xDeformed[][i3];
+
+        real y1 = yDeformed[][i1];
+        real y2 = yDeformed[][i2];
+        real y3 = yDeformed[][i3];
+
+        real r1 = x1*x1+ y1*y1 + z1*z1;
+        real r2 = x2*x2 + y2*y2 + z2*z2;
+        real r3 = x3*x3 + y3*y3 + z3*z3;
+        if((r1 + r2 + r3)<1.2*tumourRadius){continue;}
+        // cout<<"Triangle "<<i<<"V1: "<<r1<<" V2: "<<r2<<" V3: "<<r3<<endl;
+
+        int submergedCount=0;
+        if(z1<=csfHeight) submergedCount++;
+        if(z2<=csfHeight) submergedCount++;
+        if(z3<=csfHeight) submergedCount++;
+
+        //getting vertex positions for the three vertices
+        real[int] j1 = [xDeformed[][i1], yDeformed[][i1], z1]; 
+        real[int] j2 = [xDeformed[][i2], yDeformed[][i2], z2];
+        real[int] j3 = [xDeformed[][i3], yDeformed[][i3], z3];
+
+        real[int] v1 = [j2[0]-j1[0], j2[1]-j1[1], j2[2]-j1[2]];
+        real[int] v2 = [j3[0]-j1[0], j3[1]-j1[1], j3[2]-j1[2]];
+
+        real n1 = crossProductX(v1[0], v1[1], v1[2], v2[0], v2[1], v2[2]);
+        real n2 = crossProductY(v1[0], v1[1], v1[2], v2[0], v2[1], v2[2]);
+        real n3 = crossProductZ(v1[0], v1[1], v1[2], v2[0], v2[1], v2[2]);
+        real mag = sqrt(n1*n1 + n2*n2 + n3*n3);
+        real[int] n = [-n1/mag, -n2/mag, -n3/mag]; //unit normal vector
+
+
+        //All three nodes submerged
+        if(submergedCount==3){
+
+            //calculating centroid
+            real g1 = j1[0] + j2[0] + j3[0];
+            real g2 = j1[1] + j2[1] + j3[1];
+            real g3 = j1[2] + j2[2] + j3[2];
+
+            real[int] G = [g1/3, g2/3, g3/3];
+            
+            
+
+            real S = 0.5*mag;
+
+            real fluidFactor = -(rhoFluid)*abs(g)*(csfHeight - G[2])*S;
+
+
+            real[int] fluidForce = [fluidFactor * n[0], fluidFactor * n[1], fluidFactor*n[2]];
+
+            real h1 = csfHeight - z1;
+            real h2 = csfHeight - z2;
+            real h3 = csfHeight - z3;
+            real hSum = h1 + h2 + h3;
+
+            //updating fluid force for this time step
+            if(hSum > 1e-9){
+                f1[][i1] += fluidForce[0] * h1/hSum;
+                f2[][i1] += fluidForce[1] * h1/hSum;
+                f3[][i1] += fluidForce[2] * h1/hSum;
+
+                f1[][i2] += fluidForce[0] * h2/hSum;
+                f2[][i2] += fluidForce[1] * h2/hSum;
+                f3[][i2] += fluidForce[2] * h2/hSum;
+
+                f1[][i3] += fluidForce[0] * h3/hSum;
+                f2[][i3] += fluidForce[1] * h3/hSum;
+                f3[][i3] += fluidForce[2] * h3/hSum;
+            }
+
+        }
+
+        if(submergedCount==2){
+            real[int] psub1 = [0, 0, 0];
+            real[int] psub2 = [0, 0, 0];
+            real[int] pair = [0, 0, 0];
+
+            int isub1, isub2 = 0;
+
+            if (z1 > csfHeight) { pair = j1; psub1 = j2; isub1 = i2; psub2 = j3; isub2 = i3;}
+            else if (z2 > csfHeight) { pair = j2; psub1 = j1; isub1 = i1; psub2 = j3; isub2 = i3;}
+            else { pair = j3; psub1 = j1; isub1 = i1; psub2 = j2; isub2 = i2;}
+
+            real t1 = (csfHeight - psub1[2]) / (pair[2] - psub1[2]);
+
+            real[int] pint1 = [psub1[0] + t1*(pair[0] - psub1[0]), psub1[1] + t1*(pair[1] - psub1[1]), psub1[2] + t1*(pair[2] - psub1[2])];
+
+            real t2 = (csfHeight - psub2[2]) / (pair[2] - psub2[2]);
+
+            real[int] pint2 = [psub2[0] + t2*(pair[0] - psub2[0]), psub2[1] + t2*(pair[1] - psub2[1]), psub2[2] + t2*(pair[2] - psub2[2])];
+
+            // Force on Triangle A
+            real [int] Ga = [(psub1[0] + psub2[0] + pint1[0])/3., (psub1[1] + psub2[1] + pint1[1])/3., (psub1[2] + psub2[2] + pint1[2])/3.];
+
+            real[int] vA1 = [psub2[0] - psub1[0], psub2[1] - psub1[1], psub2[2] - psub1[2]];
+            real[int] vA2 = [pint1[0] - psub1[0], pint1[1] - psub1[1], pint1[2] - psub1[2]];
+
+            real Sa1 = crossProductX(vA1[0], vA1[1], vA1[2], vA2[0], vA2[1], vA2[2]);
+            real Sa2 = crossProductY(vA1[0], vA1[1], vA1[2], vA2[0], vA2[1], vA2[2]);
+            real Sa3 = crossProductZ(vA1[0], vA1[1], vA1[2], vA2[0], vA2[1], vA2[2]);
+
+            real Sa = 0.5 * sqrt(Sa1*Sa1 + Sa2*Sa2 + Sa3*Sa3);
+            real fluidFactorA = -rhoFluid *abs(g) * (csfHeight-Ga[2])*Sa;
+            real[int] fluidForceA = [fluidFactorA * n[0], fluidFactorA * n[1], fluidFactorA*n[2]];
+
+            // Force on Triangle B
+            real [int] Gb = [(pint2[0] + psub2[0] + pint1[0])/3., (pint2[1] + psub2[1] + pint1[1])/3., (pint2[2] + psub2[2] + pint1[2])/3.];
+
+            real[int] vB1 = [pint2[0] - psub2[0], pint2[1] - psub2[1], pint2[2] - psub2[2]];
+            real[int] vB2 = [pint1[0] - psub2[0], pint1[1] - psub2[1], pint1[2] - psub2[2]];
+
+            real Sb1 = crossProductX(vB1[0], vB1[1], vB1[2], vB2[0], vB2[1], vB2[2]);
+            real Sb2 = crossProductY(vB1[0], vB1[1], vB1[2], vB2[0], vB2[1], vB2[2]);
+            real Sb3 = crossProductZ(vB1[0], vB1[1], vB1[2], vB2[0], vB2[1], vB2[2]);
+
+            real Sb = 0.5 * sqrt(Sb1*Sb1 + Sb2*Sb2 + Sb3*Sb3);
+            real fluidFactorB = -rhoFluid *abs(g) * (csfHeight-Gb[2])*Sb;
+            real[int] fluidForceB = [fluidFactorB * n[0], fluidFactorB * n[1], fluidFactorB*n[2]];
+
+            real h1 = csfHeight - psub1[2];
+            real h2 = csfHeight - psub2[2];
+            real hSum = h1 + h2;
+            if (hSum > 1e-9) {
+                f1[][isub1] += fluidForceA[0] * h1/hSum;
+                f2[][isub1] += fluidForceA[1] * h1/hSum;
+                f3[][isub1] += fluidForceA[2] * h1/hSum;
+
+                f1[][isub2] += fluidForceA[0] * h2/hSum + fluidForceB[0];
+                f2[][isub2] += fluidForceA[1] * h2/hSum + fluidForceB[1];
+                f3[][isub2] += fluidForceA[2] * h2/hSum + fluidForceB[2];
+            }
+
+
+        }
+        if(submergedCount==1){
+            real[int] psub = [0, 0, 0];
+            real[int] pair1 = [0, 0, 0];
+            real[int] pair2 = [0, 0, 0];
+            int isub;
+
+            // Find which vertex is submerged
+            if (z1 <= csfHeight) { psub = j1; isub = i1; pair1 = j2; pair2 = j3;}
+            else if (z2 <= csfHeight) { psub = j2; isub = i2; pair1 = j1; pair2 = j3;}
+            else { psub = j3; isub = i3; pair1 = j1; pair2 = j2;}
+
+            real t1 = (csfHeight - psub[2]) / (pair1[2] - psub[2]);
+            real[int] pint1 = [psub[0] + t1 * (pair1[0] - psub[0]), psub[1] + t1 * (pair1[1] - psub[1]), psub[2] + t1 * (pair1[2] - psub[2])];
+
+            real t2 = (csfHeight - psub[2]) / (pair2[2] - psub[2]);
+            real[int] pint2 = [psub[0] + t2 * (pair2[0] - psub[0]), psub[1] + t2 * (pair2[1] - psub[1]), psub[2] + t2 * (pair2[2] - psub[2])];
+
+            real[int] G = [(psub[0] + pint2[0] + pint1[0])/3., (psub[1] + pint2[1] + pint1[1])/3., (psub[2] + pint2[2] + pint1[2])/3.];
+
+            real [int] v1 = [pint1[0] - psub[0], pint1[1] - psub[1], pint1[2] - psub[2]];
+            real [int] v2 = [pint2[0] - psub[0], pint2[1] - psub[1], pint2[2] - psub[2]];
+
+            real S1 = crossProductX(v1[0], v1[1], v1[2], v2[0], v2[1], v2[2]);
+            real S2 = crossProductY(v1[0], v1[1], v1[2], v2[0], v2[1], v2[2]);
+            real S3 = crossProductZ(v1[0], v1[1], v1[2], v2[0], v2[1], v2[2]);
+
+            real S = 0.5 * sqrt(S1*S1 + S2*S2 + S3*S3);
+
+            real fluidFactor = -rhoFluid * abs(g) * (csfHeight - G[2]) * S;
+
+            real[int] fluidForce = [fluidFactor * n[0], fluidFactor * n[1], fluidFactor*n[2]];
+            
+            f1[][isub] += fluidForce[0];
+            f2[][isub] += fluidForce[1];
+            f3[][isub] += fluidForce[2];
+
+        }
+
+    }
+
+    // medit("Fluid Force Vectors", Th, f1, wait=true);
+
+}
+
+matrix K0 = Klinear(Vh3, Vh3);
+matrix C = 0*M + 0*K0;
+real penalty = 1e30;
+
+for (int step = 1; step <= nsteps; ++step) {
+
+    real t = step * dt;
+    cout << "Time step: " << step << " (t = " << t << ")" << endl;
+
+    real currentCsfHeight = brainRadius + (cutHeight - brainRadius) * (t / Tfinal);
+
+    cout << "  Current CSF Height = " << currentCsfHeight << endl;
+
+    calculateFluidForce(currentCsfHeight);
+
+    
+    real[int] R = residual(0, Vh3); 
+    for(int i=0;i < Th.nv;i++){ //add fluid forces
+        R[i*3 + 0] += f1[][i];
+        R[i*3 + 1] += f2[][i];
+        R[i*3 + 2] += f3[][i];
+
+    } 
+
+    for (int iter = 0; iter < maxiter; ++iter) {
+
+        matrix KL = Klinear(Vh3, Vh3, solver=UMFPACK);
+        matrix KNL = Knonlinear(Vh3, Vh3, solver=UMFPACK);
+
+        matrix K = KL + KNL;
+
+        matrix Keff = K + (4./(dt*dt))*M + (2./dt)*C;
+
+        set(Keff, solver=UMFPACK);
+
+
+        real[int] Reff = R;
+        real[int] F = internalForce(0, Vh3);
+        Reff-=F;
+
+        real[int] temp(at1[].n);
+
+        temp = u1[] - ut1[];
+        temp *= (4. / (dt*dt));
+        temp -= (4. / dt) * vt1[];
+
+        an1[] = temp - at1[];
+
+        real[int] inertialForce = M * an1[];
+        Reff -= inertialForce;
+
+        real[int] temp1(at1[].n);
+        temp1 = u1[] - ut1[];
+        temp1 *= (2./dt);
+        temp1 -= vt1[];
+
+        for (int i = 0; i < Th.nv; i++) {
+        if (Th(i).z < occipitalPin || Th(i).x > brainStemPin) {
+            // For each of the 3 DOFs of this node
+            for (int d = 0; d < 3; d++) {
+                int dof = i*3 + d;
+                Keff(dof, dof) = penalty;
+                Reff[dof] = 0.0;  // want zero displacement increment
+            }
+        }
+    }
+
+        // real[int] dampingForce = C * temp1;
+        // Reff -= dampingForce;
+        
+        real normR = Reff.l2;
+        cout << "  NR Iter: " << iter << ", Residual Norm = " << normR << endl;
+        
+
+        if (normR < tol) {
+            cout << "  -> CONVERGED" << endl;
+            
+            
+            //store values
+
+            real[int] newVel(u1[].n);
+            real[int] newAcc(u1[].n);
+
+            newVel = u1[] - ut1[];
+            newVel *= (2.0/dt);
+            newVel -= vt1[];           // newVel = (2/dt)(U_new - U_old) - V_old  ✓
+
+            newAcc = u1[] - ut1[];
+            newAcc *= (4.0/(dt*dt));
+            newAcc -= (4.0/dt)*vt1[]; // uses OLD vt1, correct
+            newAcc -= at1[];           // uses OLD at1, correct
+
+            // Now safe to overwrite
+            vt1[] = newVel;
+            at1[] = newAcc;
+            ut1[] = u1[];
+
+            for (int i = 0; i < Th.nv; i++) {
+                if (Th(i).z < occipitalPin || Th(i).x > brainStemPin) {
+                    for (int d = 0; d < 3; d++) {
+                        int dof = i*3 + d;
+                        u1[][dof] = 0.0;
+                        ut1[][dof] = 0.0;
+                        at1[][dof] = 0.0;
+                        vt1[][dof] = 0.0;
+
+                    }
+                }
+            }
+
+
+            break; 
+        }        
+       
+        du1[] = Keff^-1 * Reff;
+
+        u1[] += du1[];
+
+        for (int i = 0; i < Th.nv; i++) {
+            if (Th(i).z < occipitalPin || Th(i).x > brainStemPin) {
+                for (int d = 0; d < 3; d++) {
+                    int dof = i*3 + d;
+                    u1[][dof] = 0.0;
+                    ut1[][dof] = 0.0;
+                    at1[][dof] = 0.0;
+                    vt1[][dof] = 0.0;
+
+                }
+            }
+            }
+        
+        if(iter == maxiter - 1){
+            cout << "  WARNING: Max iterations reached without convergence." << endl;
+            
+        }
+    }
+}
+
+
+
+
+mesh3 ThDeformed = movemesh(Th, [x+u1*1.2, y+u2*1.2, z+u3*1.2]);
+// --- AT THE END OF THE STEP LOOP ---
+// savemesh(Th, "brain_sim_final.mesh"); // Saves the connectivity
+savesol("brain_disp.sol", Th, [u1, u2, u3]); // Saves the u1, u2, u3 values
+cout << "Simulation data saved to disk." << endl;
+
+savemesh(ThDeformed, "brain_deformed.mesh");
+// savemesh(ThDeformed, "brain_deformed.msh");
+
+// medit("Displacement", Th, u1, wait=true);
+// medit("Displacement", Th, u2, wait=true);
+// medit("Displacement", Th, u3, wait=true);
+
+// plot(ThDeformed, cmm="Deformed Mesh", value=true, wait=true);
+// plot(Th, cmm="Original", value=true, boundary=true, wait=true); 
+// plot(ThDeformed, cmm="Deformed Mesh", value=true, wait=true);
+// medit("3D Mesh", ThDeformed);
+
+// --- POST-PROCESSING AND STATISTICS ---
+
+// 1. Calculate Displacement Magnitude
+Vh displacementMag = sqrt(u1^2 + u2^2 + u3^2);
+real maxDisp = displacementMag[].max;
+real meanDisp = int3d(Th)(displacementMag) / int3d(Th)(1.0);
+
+// 2. Volume Check (Conservation of Mass)
+real initialVol = int3d(Th)(1.0);
+// Volume of deformed mesh using the Jacobian of the transformation
+real deformedVol = int3d(Th)( (1+dx(u1))*(1+dy(u2))*(1+dz(u3)) ); 
+real volChangePercent = abs(deformedVol - initialVol)/initialVol * 100;
+
+// 3. Tumor Specific Shift
+// Assuming region 2 is your tumor (check your gmsh labels)
+real tumorShift = int3d(Th, 10)(displacementMag) / int3d(Th, 10)(1.0);
+
+// 4. Max Sag (Negative Z displacement)
+real maxSag = -u3[].min; 
+
+// --- PRINTING TO CONSOLE ---
+cout << "===========================================" << endl;
+cout << "       SIMULATION RESULTS SUMMARY          " << endl;
+cout << "===========================================" << endl;
+cout << "Max Brain Displacement:    " << maxDisp * 1000 << " mm" << endl;
+cout << "Mean Brain Displacement:   " << meanDisp * 1000 << " mm" << endl;
+cout << "Max Vertical Sag (Z):      " << maxSag * 1000 << " mm" << endl;
+cout << "-------------------------------------------" << endl;
+cout << "Tumor Displacement:        " << tumorShift * 1000 << " mm" << endl;
+cout << "-------------------------------------------" << endl;
+cout << "Volume Conservation Error: " << volChangePercent << " %" << endl;
+cout << "Total Simulation Time:     " << Tfinal << " seconds" << endl;
+cout << "===========================================" << endl;
+
+// --- EXPORT FOR PLOTTING ---
+// This saves the displacement magnitude to a file you can open in Excel/Paraview
+{
+    ofstream f("results_stats.txt");
+    f << "Max_Disp_mm: " << maxDisp * 1000 << endl;
+    f << "Tumor_Shift_mm: " << tumorShift * 1000 << endl;
+    f << "Vol_Error: " << volChangePercent << endl;
+}
+
