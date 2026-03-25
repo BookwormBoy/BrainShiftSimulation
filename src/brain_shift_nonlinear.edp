@@ -12,6 +12,10 @@ real brainMeshSize = 0.002;
 real tumourRadius = 0.01;
 real tumourMeshSize = 0.01;
 
+
+real occipitalPin = -4*brainRadius/5;
+real brainStemPin = 3*brainRadius/5;
+
 //Simulation Parameters
 real rho = 1036;    // Density of brain
 real E = 7070;      // young's modulus (Pa)
@@ -40,7 +44,16 @@ mesh3 Th;
 Th = gmshload3("../models/brain_tumour_merged.msh");
 Th = movemesh3(Th, transfo=[x/1000.0, y/1000.0, z/1000.0]);
 Th = movemesh3(Th, transfo=[-z, x, -y]);
-plot(Th, wait=1);
+func int newLabel() {
+    int lab = 30;
+    if (region == 10)      lab = 11;  // tumour surface
+    if (z < occipitalPin)  lab = 31;  // occipital pin
+    if (x > brainStemPin)  lab = 32;  // brainstem pin
+    return lab;
+}
+
+Th = change(Th, flabel = newLabel());
+// plot(Th, wait=1);
 
 fespace Vh(Th, P1);
 fespace Vh3(Th, [P1, P1, P1]); // Vector space for displacement
@@ -64,8 +77,6 @@ Vh f3=0;
 real csfHeight = 1.0;
 real cutHeight = 0.0;
 
-real occipitalPin = -3*brainRadius/5;
-real brainStemPin = 3*brainRadius/5;
  
 
 //Tensor macros
@@ -196,22 +207,30 @@ varf Knonlinear([du1,du2,du3], [v1,v2,v3]) =
         + 2.*S12(u1, u2, u3)*deta12(du1,du2,du3, v1,v2,v3)
         + 2.*S13(u1, u2, u3)*deta13(du1,du2,du3, v1,v2,v3)
         + 2.*S23(u1, u2, u3)*deta23(du1,du2,du3, v1,v2,v3)
-    );
+    )
+
+    + on(31, du1=0, du2=0, du3=0)
+    + on(32, du1=0, du2=0, du3=0);
 
 varf Klinear([du1,du2,du3],[v1,v2,v3]) =
-int3d(Th)(
-    lambda*traceeps(du1,du2,du3)*tracedeps(v1,v2,v3)
-  + 2.*mu*(
-        eps11(du1,du2,du3)*deps11(v1,v2,v3)
-      + eps22(du1,du2,du3)*deps22(v1,v2,v3)
-      + eps33(du1,du2,du3)*deps33(v1,v2,v3)
-      + 2.*(
-            eps12(du1,du2,du3)*deps12(v1,v2,v3)
-          + eps13(du1,du2,du3)*deps13(v1,v2,v3)
-          + eps23(du1,du2,du3)*deps23(v1,v2,v3)
+    int3d(Th)(
+        lambda*traceeps(du1,du2,du3)*tracedeps(v1,v2,v3)
+    + 2.*mu*(
+            eps11(du1,du2,du3)*deps11(v1,v2,v3)
+        + eps22(du1,du2,du3)*deps22(v1,v2,v3)
+        + eps33(du1,du2,du3)*deps33(v1,v2,v3)
+        + 2.*(
+                eps12(du1,du2,du3)*deps12(v1,v2,v3)
+            + eps13(du1,du2,du3)*deps13(v1,v2,v3)
+            + eps23(du1,du2,du3)*deps23(v1,v2,v3)
+            )
         )
+
+    
     )
-);
+
+    + on(31, du1=0, du2=0, du3=0)
+    + on(32, du1=0, du2=0, du3=0);
 
 
 varf residual([unused1,unused2,unused3], [v1,v2,v3]) =
@@ -290,7 +309,7 @@ func real calculateFluidForce(real csfHeight) {
         real r1 = x1*x1+ y1*y1 + z1*z1;
         real r2 = x2*x2 + y2*y2 + z2*z2;
         real r3 = x3*x3 + y3*y3 + z3*z3;
-        if((r1 + r2 + r3)<1.2*tumourRadius){continue;}
+        if(Th.be(i).label == 11) continue; 
         // cout<<"Triangle "<<i<<"V1: "<<r1<<" V2: "<<r2<<" V3: "<<r3<<endl;
 
         int submergedCount=0;
@@ -484,10 +503,11 @@ for (int step = 1; step <= nsteps; ++step) {
 
     } 
 
+    matrix KL = Klinear(Vh3, Vh3);
+
     for (int iter = 0; iter < maxiter; ++iter) {
 
-        matrix KL = Klinear(Vh3, Vh3, solver=UMFPACK);
-        matrix KNL = Knonlinear(Vh3, Vh3, solver=UMFPACK);
+        matrix KNL = Knonlinear(Vh3, Vh3);
 
         matrix K = KL + KNL;
 
@@ -516,16 +536,16 @@ for (int step = 1; step <= nsteps; ++step) {
         temp1 *= (2./dt);
         temp1 -= vt1[];
 
-        for (int i = 0; i < Th.nv; i++) {
-        if (Th(i).z < occipitalPin || Th(i).x > brainStemPin) {
-            // For each of the 3 DOFs of this node
-            for (int d = 0; d < 3; d++) {
-                int dof = i*3 + d;
-                Keff(dof, dof) = penalty;
-                Reff[dof] = 0.0;  // want zero displacement increment
-            }
-        }
-    }
+        // for (int i = 0; i < Th.nv; i++) {
+        // if (Th(i).z < occipitalPin || Th(i).x > brainStemPin) {
+        //     // For each of the 3 DOFs of this node
+        //     for (int d = 0; d < 3; d++) {
+        //         int dof = i*3 + d;
+        //         Keff(dof, dof) = penalty;
+        //         Reff[dof] = 0.0;  // want zero displacement increment
+        //     }
+        // }
+    // }
 
         // real[int] dampingForce = C * temp1;
         // Reff -= dampingForce;
@@ -557,18 +577,18 @@ for (int step = 1; step <= nsteps; ++step) {
             at1[] = newAcc;
             ut1[] = u1[];
 
-            for (int i = 0; i < Th.nv; i++) {
-                if (Th(i).z < occipitalPin || Th(i).x > brainStemPin) {
-                    for (int d = 0; d < 3; d++) {
-                        int dof = i*3 + d;
-                        u1[][dof] = 0.0;
-                        ut1[][dof] = 0.0;
-                        at1[][dof] = 0.0;
-                        vt1[][dof] = 0.0;
+            // for (int i = 0; i < Th.nv; i++) {
+            //     if (Th(i).z < occipitalPin || Th(i).x > brainStemPin) {
+            //         for (int d = 0; d < 3; d++) {
+            //             int dof = i*3 + d;
+            //             u1[][dof] = 0.0;
+            //             ut1[][dof] = 0.0;
+            //             at1[][dof] = 0.0;
+            //             vt1[][dof] = 0.0;
 
-                    }
-                }
-            }
+            //         }
+            //     }
+            // }
 
 
             break; 
@@ -578,18 +598,18 @@ for (int step = 1; step <= nsteps; ++step) {
 
         u1[] += du1[];
 
-        for (int i = 0; i < Th.nv; i++) {
-            if (Th(i).z < occipitalPin || Th(i).x > brainStemPin) {
-                for (int d = 0; d < 3; d++) {
-                    int dof = i*3 + d;
-                    u1[][dof] = 0.0;
-                    ut1[][dof] = 0.0;
-                    at1[][dof] = 0.0;
-                    vt1[][dof] = 0.0;
+        // for (int i = 0; i < Th.nv; i++) {
+        //     if (Th(i).z < occipitalPin || Th(i).x > brainStemPin) {
+        //         for (int d = 0; d < 3; d++) {
+        //             int dof = i*3 + d;
+        //             u1[][dof] = 0.0;
+        //             ut1[][dof] = 0.0;
+        //             at1[][dof] = 0.0;
+        //             vt1[][dof] = 0.0;
 
-                }
-            }
-            }
+        //         }
+        //     }
+        //     }
         
         if(iter == maxiter - 1){
             cout << "  WARNING: Max iterations reached without convergence." << endl;

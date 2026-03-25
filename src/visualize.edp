@@ -1,38 +1,30 @@
+load "msh3"
 load "gmsh"
 load "iovtk"
 
-mesh3 Th = readmesh3("brain_initial.mesh");
-mesh3 ThDeformed = readmesh3("brain_deformed.mesh");
+// Constants must be defined before the func
+real brainRadius = 0.07;
+real occipitalPin = -4*brainRadius/5;
+real brainStemPin =  3*brainRadius/5;
+real tumourRadius = 0.01;
 
-Th = trunc(Th, (region == 20));
-ThDeformed = trunc(ThDeformed, (region == 20));
-
-// Scale initial from mm to meters
+mesh3 Th = gmshload3("../models/brain_tumour_merged.msh");
 Th = movemesh3(Th, transfo=[x/1000.0, y/1000.0, z/1000.0]);
-plot(Th, cmm="original", wait = true);
-plot(ThDeformed, cmm="deformed", wait = true);
-plot(Th, ThDeformed, cmm="deformed", wait = true);
+Th = movemesh3(Th, transfo=[-z, x, -y]);
 
+func int newLabel() {
+    int lab = 30;
+    if (region == 10)      lab = 11;  // tumour surface
+    if (z < occipitalPin)  lab = 31;  // occipital pin
+    if (x > brainStemPin)  lab = 32;  // brainstem pin
+    return lab;
+}
 
+Th = change(Th, flabel = newLabel());
 
-// Recompute coords after scaling
-fespace Vh(Th, P1);
-fespace VhD(ThDeformed, P1);
-Vh XX = x, YY = y, ZZ = z;
-VhD XXd = x, YYd = y, ZZd = z;
+fespace Vh0(Th, P0);
+Vh0 blabel = label;
+Vh0 reg = region;
 
-real minY = YY[].min;
-real minYd = YYd[].min;
-real minX = XX[].min;
-
-cout << "minY initial: " << minY << endl;
-cout << "minY deformed: " << minYd << endl;
-
-real yOffset = minYd - minY;
-real xOffset = 0.15;
-
-// Th = movemesh3(Th, transfo=[x + xOffset, y + yOffset, z]);
-
-int[int] order = [1];
-savevtk("brain_initial.vtk", Th, order=order);
-savevtk("brain_deformed.vtk", ThDeformed, order=order);
+savevtk("mesh_viz.vtu", Th, blabel, reg, dataname="BoundaryLabel Region");
+cout << "Saved mesh_viz.vtu" << endl;

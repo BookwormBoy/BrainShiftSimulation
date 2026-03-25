@@ -1,26 +1,31 @@
+load "msh3"
 load "gmsh"
-mesh3 Th = gmshloadS("brain_initial.mesh");
-// Scale mm to meters
-Th = movemesh3(Th, transfo=[x/1000.0, y/1000.0, z/1000.0]);
-Th = movemesh3(Th, transfo=[-z, x, -y]);
 
+mesh3 Th = gmshload3("../models/brain_tumour_merged.msh");
 
-// Use a P1 Finite Element Space to capture coordinates
-fespace Vh(Th, P1);
-Vh XX = x, YY = y, ZZ = z;
+// Collect unique labels
+int[int] regionsSeen(1000);
+regionsSeen = 0;
+for(int i = 0; i < Th.nt; i++)
+    regionsSeen[Th[i].region] = 1;
 
-// Get Min and Max coordinates
-real minX = XX[].min, maxX = XX[].max;
-real minY = YY[].min, maxY = YY[].max;
-real minZ = ZZ[].min, maxZ = ZZ[].max;
+cout << "Volume regions found: ";
+for(int i = 0; i < 1000; i++)
+    if(regionsSeen[i]) cout << i << " ";
+cout << endl;
 
-// Calculate Size
-real width  = maxX - minX;
-real depth  = maxY - minY;
-real height = maxZ - minZ;
+// Same for boundary
+int[int] labelsSeen(1000);
+labelsSeen = 0;
+for(int i = 0; i < Th.nbe; i++)
+    labelsSeen[Th.be(i).label] = 1;
 
-cout << "--- Brain Dimensions ---" << endl;
-cout << "X (Width):  " << minX << " to " << maxX << " (Size: " << width << ")" << endl;
-cout << "Y (Depth):  " << minY << " to " << maxY << " (Size: " << depth << ")" << endl;
-cout << "Z (Height): " << minZ << " to " << maxZ << " (Size: " << height << ")" << endl;
-cout << "------------------------" << endl;
+cout << "Boundary labels found: ";
+for(int i = 0; i < 1000; i++)
+    if(labelsSeen[i]) cout << i << " ";
+cout << endl;
+```
+
+**2. The most likely cause** is that your `.geo` Physical Volume definitions didn't get picked up correctly — so everything got label 0 or 1. Can you share what the terminal output says when you run `gmsh brain_tumor2.geo -3 ...`? Specifically look for lines like:
+```
+Info: 2 volumes, 1 physical group
