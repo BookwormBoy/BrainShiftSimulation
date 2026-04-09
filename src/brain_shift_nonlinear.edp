@@ -18,8 +18,8 @@ real brainStemPin = 3*brainRadius/5;
 
 //Simulation Parameters
 real rho = 1036;    // Density of brain
-real E = 7070;      // young's modulus (Pa)
-real nu = 0.4925;   // poisson's ratio
+real E = 2000;      // young's modulus (Pa)
+real nu = 0.45;   // poisson's ratio
 real g = -9.81;  
 
 real Tfinal = 0.05;
@@ -577,18 +577,18 @@ for (int step = 1; step <= nsteps; ++step) {
             at1[] = newAcc;
             ut1[] = u1[];
 
-            // for (int i = 0; i < Th.nv; i++) {
-            //     if (Th(i).z < occipitalPin || Th(i).x > brainStemPin) {
-            //         for (int d = 0; d < 3; d++) {
-            //             int dof = i*3 + d;
-            //             u1[][dof] = 0.0;
-            //             ut1[][dof] = 0.0;
-            //             at1[][dof] = 0.0;
-            //             vt1[][dof] = 0.0;
+            for (int i = 0; i < Th.nv; i++) {
+                if (Th(i).z < occipitalPin || Th(i).x > brainStemPin) {
+                    for (int d = 0; d < 3; d++) {
+                        int dof = i*3 + d;
+                        u1[][dof] = 0.0;
+                        ut1[][dof] = 0.0;
+                        at1[][dof] = 0.0;
+                        vt1[][dof] = 0.0;
 
-            //         }
-            //     }
-            // }
+                    }
+                }
+            }
 
 
             break; 

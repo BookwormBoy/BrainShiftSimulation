@@ -1,0 +1,130 @@
+load "gmsh"
+load "medit"
+
+// 1. MESH AND TRANSFORM
+mesh3 Th = gmshload3("../models/brain_tumour_merged.msh");
+Th = movemesh3(Th, transfo=[x/1000.0, y/1000.0, z/1000.0]);
+Th = movemesh3(Th, transfo=[-z, x, -y]);
+
+// 2. BOUNDARY LABELS AND MASKING
+real brainRadius = 0.07;
+real occipitalPin = -4*brainRadius/5;
+real brainStemPin = 3*brainRadius/5;
+
+// Define a "Mask" function: 0 where pinned, 1 where free
+// This allows us to replace the slow 'for' loop with a fast vector multiplication
+fespace Vh(Th, P1);
+Vh isPinned = (z < occipitalPin || x > brainStemPin);
+Vh isFree = 1.0 - isPinned; 
+
+fespace Vh3(Th, [P1, P1, P1]);
+Vh3 [mask1, mask2, mask3] = [isFree, isFree, isFree]; 
+
+// 3. CONSTANTS
+real rho = 1036; 
+real E = 2000; 
+real nu = 0.49; 
+real g = -9.81;  
+real mu = E / (2 * (1 + nu));
+real lambda = E * nu / ((1 + nu) * (1 - 2 * nu));
+real rhoFluid = 1000; 
+real cutHeight = 0.0;
+
+real Tfinal = 0.5;
+real dt = 0.00005; // Note: Ensure this is below critical time step!
+int nsteps = Tfinal/dt;
+
+// 4. PRE-COMPUTATION STAGE (Miller Step 2-3)
+// Lumped Mass Matrix
+varf vMLumped([u1,u2,u3], [v1,v2,v3]) = int3d(Th)(rho*v1 + rho*v2 + rho*v3);
+real[int] Mdiag = vMLumped(0, Vh3); 
+
+// Gravity (Pre-compute because it is constant)
+varf vGravity([u1,u2,u3], [v1,v2,v3]) = int3d(Th)(rho * g * v3);
+real[int] Fgravity = vGravity(0, Vh3);
+
+// 5. THE MACROS (Unchanged - these are efficient)
+macro X11(u1,u2,u3) (1.0 + dx(u1)) //
+macro X12(u1,u2,u3) (dy(u1))      //
+macro X13(u1,u2,u3) (dz(u1))      //
+macro X21(u1,u2,u3) (dx(u2))      //
+macro X22(u1,u2,u3) (1.0 + dy(u2)) //
+macro X23(u1,u2,u3) (dz(u2))      //
+macro X31(u1,u2,u3) (dx(u3))      //
+macro X32(u1,u2,u3) (dy(u3))      //
+macro X33(u1,u2,u3) (1.0 + dz(u3)) //
+macro E11(u1,u2,u3) (0.5*(X11(u1,u2,u3)^2 + X21(u1,u2,u3)^2 + X31(u1,u2,u3)^2 - 1.0)) //
+macro E22(u1,u2,u3) (0.5*(X12(u1,u2,u3)^2 + X22(u1,u2,u3)^2 + X32(u1,u2,u3)^2 - 1.0)) //
+macro E33(u1,u2,u3) (0.5*(X13(u1,u2,u3)^2 + X23(u1,u2,u3)^2 + X33(u1,u2,u3)^2 - 1.0)) //
+macro E12(u1,u2,u3) (0.5*(X11(u1,u2,u3)*X12(u1,u2,u3) + X21(u1,u2,u3)*X22(u1,u2,u3) + X31(u1,u2,u3)*X32(u1,u2,u3))) //
+macro E13(u1,u2,u3) (0.5*(X11(u1,u2,u3)*X13(u1,u2,u3) + X21(u1,u2,u3)*X23(u1,u2,u3) + X31(u1,u2,u3)*X33(u1,u2,u3))) //
+macro E23(u1,u2,u3) (0.5*(X12(u1,u2,u3)*X13(u1,u2,u3) + X22(u1,u2,u3)*X23(u1,u2,u3) + X32(u1,u2,u3)*X33(u1,u2,u3))) //
+macro traceE(u1,u2,u3) (E11(u1,u2,u3) + E22(u1,u2,u3) + E33(u1,u2,u3)) //
+macro S11(u1,u2,u3) (lambda*traceE(u1,u2,u3) + 2.0*mu*E11(u1,u2,u3)) //
+macro S22(u1,u2,u3) (lambda*traceE(u1,u2,u3) + 2.0*mu*E22(u1,u2,u3)) //
+macro S33(u1,u2,u3) (lambda*traceE(u1,u2,u3) + 2.0*mu*E33(u1,u2,u3)) //
+macro S12(u1,u2,u3) (2.0*mu*E12(u1,u2,u3)) //
+macro S13(u1,u2,u3) (2.0*mu*E13(u1,u2,u3)) //
+macro S23(u1,u2,u3) (2.0*mu*E23(u1,u2,u3)) //
+macro dE11(u1,u2,u3, v1,v2,v3) (X11(u1,u2,u3)*dx(v1) + X21(u1,u2,u3)*dx(v2) + X31(u1,u2,u3)*dx(v3)) //
+macro dE22(u1,u2,u3, v1,v2,v3) (X12(u1,u2,u3)*dy(v1) + X22(u1,u2,u3)*dy(v2) + X32(u1,u2,u3)*dy(v3)) //
+macro dE33(u1,u2,u3, v1,v2,v3) (X13(u1,u2,u3)*dz(v1) + X23(u1,u2,u3)*dz(v2) + X33(u1,u2,u3)*dz(v3)) //
+macro dE12(u1,u2,u3, v1,v2,v3) (0.5*(X11*dy(v1)+X21*dy(v2)+X31*dy(v3)+X12*dx(v1)+X22*dx(v2)+X32*dx(v3))) //
+macro dE13(u1,u2,u3, v1,v2,v3) (0.5*(X11*dz(v1)+X21*dz(v2)+X31*dz(v3)+X13*dx(v1)+X23*dx(v2)+X33*dx(v3))) //
+macro dE23(u1,u2,u3, v1,v2,v3) (0.5*(X12*dz(v1)+X22*dz(v2)+X32*dz(v3)+X13*dy(v1)+X23*dy(v2)+X33*dy(v3))) //
+
+// 6. SOLVER VARIABLES
+Vh3 [un1, un2, un3] = [0,0,0];      
+Vh3 [up1, up2, up3] = [0,0,0];      
+Vh3 [unext1, unext2, unext3] = [0,0,0]; 
+Vh3 [u1, u2, u3] = [0,0,0]; // Dummy for macros
+
+// 7. OPTIMIZED FLUID FORCE (Replace manual loop with a surface integration)
+// Using int2d is compiled and hundreds of times faster than looping be[]
+varf vFluid([uu1,uu2,uu3], [v1,v2,v3]) = 
+    int2d(Th)( (z < cutHeight) ? ( -rhoFluid * abs(g) * (cutHeight - z) * (N.x*v1 + N.y*v2 + N.z*v3) ) : 0 );
+
+// 8. OPTIMIZED INTERNAL FORCE (Use 1-point quadrature as per Miller)
+varf vInternal([unused], [v1,v2,v3]) = 
+    int3d(Th, qpt=1)(
+          S11(u1,u2,u3) * dE11(u1,u2,u3, v1,v2,v3)
+        + S22(u1,u2,u3) * dE22(u1,u2,u3, v1,v2,v3)
+        + S33(u1,u2,u3) * dE33(u1,u2,u3, v1,v2,v3)
+        + 2.0 * S12(u1,u2,u3) * dE12(u1,u2,u3, v1,v2,v3)
+        + 2.0 * S13(u1,u2,u3) * dE13(u1,u2,u3, v1,v2,v3)
+        + 2.0 * S23(u1,u2,u3) * dE23(u1,u2,u3, v1,v2,v3)
+    );
+
+// 9. TIME STEPPING LOOP
+for (int step = 0; step < nsteps; ++step) {
+    real t = step * dt;
+
+    // A. Sync current displacement for macros
+    u1[] = un1[];
+
+    // B. Internal Force Vector (Calculated in compiled C++)
+    real[int] Fint = vInternal(0, Vh3);
+
+    // C. Fluid Force Vector (Integrated over surface - FAST)
+    real[int] Ffluid = vFluid(0, Vh3);
+
+    // D. MILLER UPDATE (Vectorized math - NO nodal loop)
+    // Formula: unext = (dt^2/M)*(Fgravity + Ffluid - Fint) + 2*un - up
+    unext1[] = (dt*dt ./ Mdiag) .* (Fgravity + Ffluid - Fint) + 2.0*un1[] - up1[];
+
+    // E. APPLY BOUNDARY CONDITIONS (Vectorized Masking)
+    // This zeros out the displacement of pinned nodes instantly
+    unext1[] = unext1[] .* mask1[];
+
+    // F. SHIFT MEMORY
+    up1[] = un1[];
+    un1[] = unext1[];
+    
+    if (step % 200 == 0) cout << "Step " << step << " | t=" << t << endl;
+}
+
+// 10. POST-PROCESSING
+u1[] = un1[];
+mesh3 ThDeformed = movemesh3(Th, transfo=[x+u1, y+u2, z+u3]);
+savemesh(ThDeformed, "brain_deformed_final.mesh");
+plot(ThDeformed, wait=1);
