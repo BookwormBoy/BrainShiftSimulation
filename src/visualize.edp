@@ -1,30 +1,39 @@
 load "msh3"
 load "gmsh"
-load "iovtk"
 
-// Constants must be defined before the func
-real brainRadius = 0.07;
-real occipitalPin = -4*brainRadius/5;
-real brainStemPin =  3*brainRadius/5;
-real tumourRadius = 0.01;
-
-mesh3 Th = gmshload3("../models/brain_tumour_merged.msh");
+mesh3 Th = gmshload3("../scripts/brain_tv.msh");
 Th = movemesh3(Th, transfo=[x/1000.0, y/1000.0, z/1000.0]);
 Th = movemesh3(Th, transfo=[-z, x, -y]);
 
-func int newLabel() {
-    int lab = 30;
-    if (region == 10)      lab = 11;  // tumour surface
-    if (z < occipitalPin)  lab = 31;  // occipital pin
-    if (x > brainStemPin)  lab = 32;  // brainstem pin
-    return lab;
-}
+mesh3 ThBrain      = trunc(Th, (region == 20));
+mesh3 ThTumour     = trunc(Th, (region == 10));
+mesh3 ThVentricles = trunc(Th, (region == 30));
 
-Th = change(Th, flabel = newLabel());
+cout << "Brain tets:      " << ThBrain.nt << endl;
+cout << "Tumour tets:     " << ThTumour.nt << endl;
+cout << "Ventricle tets:  " << ThVentricles.nt << endl;
 
-fespace Vh0(Th, P0);
-Vh0 blabel = label;
-Vh0 reg = region;
+plot(ThBrain,      wait=1, cmm="Brain (region 20)");
+plot(ThTumour,     wait=1, cmm="Tumour (region 10)");
+plot(ThVentricles, wait=1, cmm="Ventricles (region 30)");
+// func int newLabel() {
+//     int lab = 30;
+//     if (region == 10)      lab = 11;  // tumour surface
+//     if (z < occipitalPin)  lab = 31;  // occipital pin
+//     if (x > brainStemPin)  lab = 32;  // brainstem pin
+//     return lab;
+// }
 
-savevtk("mesh_viz.vtu", Th, blabel, reg, dataname="BoundaryLabel Region");
-cout << "Saved mesh_viz.vtu" << endl;
+// Th = change(Th, flabel = newLabel());
+
+// fespace Vh0(Th, P0);
+// Vh0 blabel = label;
+// Vh0 reg = region;
+
+// savevtk("mesh_viz.vtu", Th, blabel, reg, dataname="BoundaryLabel Region");
+// cout << "Saved mesh_viz.vtu" << endl;
+
+// real brainRadius = 0.07;
+// real occipitalPin = -4*brainRadius/5;
+// real brainStemPin =  3*brainRadius/5;
+// real tumourRadius = 0.01;

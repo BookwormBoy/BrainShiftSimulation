@@ -1,0 +1,16 @@
+# Large/generated 3D model files
+*.stl
+*.nrrd
+*.msh
+*.mesh
+*.mrml
+
+# Generated images
+*.png
+
+# Temporary scripts
+fixmesh.py
+try.py
+
+# Local architecture/docs directory
+/arch/
