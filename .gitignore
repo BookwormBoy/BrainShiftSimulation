@@ -14,3 +14,5 @@ try.py
 
 # Local architecture/docs directory
 /arch/
+
+/outputs/
